@@ -904,6 +904,3 @@ Pełka, P. (2023). Analysis and forecasting of monthly electricity demand time s
 # Anexo: reproducibilidad
 
 El documento contiene la lectura de datos, la sustitución de 2020, la identificación, la estimación, las tablas y todas las figuras. Para reproducirlo, se debe colocar `Demanda_maxima_electricidad.csv` junto con el `.qmd`, instalar los paquetes `forecast`, `ggplot2`, `knitr`, `lmtest` y `tseries`, y renderizar con Quarto. La fuente exacta del CSV es el enlace de ARESEP de las referencias. Los valores del CENCE están incorporados en el código. 
-
-Repositorio GitHub: pendiente de incorporar por el grupo.
-
