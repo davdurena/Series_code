@@ -1,0 +1,909 @@
+---
+title: "Selección de un modelo para pronosticar la demanda máxima mensual de electricidad en Costa Rica"
+subtitle: "Comparación de suavizamiento exponencial, SARIMA, regresión y regresión dinámica (2000–2024)"
+author:
+  - "David Ureña Soto"
+  - "Allyson Arick"
+  - "Daniela Marín"
+date: "2026-11-26"
+format:
+  pdf:
+    documentclass: article
+    papersize: letter
+    geometry: margin=0.9in
+    fontsize: 11pt
+    pdf-engine: lualatex
+    number-sections: true
+    colorlinks: true
+execute:
+  echo: false
+  warning: false
+  message: false
+  fig-align: center
+---
+
+```{r}
+#| label: datos
+#| include: false
+library(forecast)
+library(ggplot2)
+library(knitr)
+library(lmtest)
+library(tseries)
+
+meses <- c("Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+           "Julio", "Agosto", "Setiembre", "Octubre", "Noviembre", "Diciembre")
+base <- read.csv("Demanda_maxima_electricidad.csv", check.names = FALSE,
+                 fileEncoding = "UTF-8")
+base$mes <- match(trimws(base$Mes), meses)
+base <- base[order(base$Año, base$mes), ]
+
+# Máximos mensuales de CENCE: enero a diciembre de 2020, en MW.
+base$`Demanda máxima`[base$Año == 2020] <- c(
+  1654.02, 1684.44, 1737.75, 1613.22, 1636.83, 1610.19,
+  1581.35, 1606.99, 1616.02, 1646.80, 1632.62, 1654.93)
+y <- ts(base$`Demanda máxima`, start = c(2000, 1), frequency = 12)
+
+# Ventanas de entrenamiento y validación.
+y20 <- window(y, end = c(2020, 12))
+y21 <- window(y, end = c(2021, 12))
+y22 <- window(y, end = c(2022, 12))
+y23 <- window(y, end = c(2023, 12))
+z21 <- window(y, start = c(2021, 1), end = c(2021, 12))
+z22 <- window(y, start = c(2022, 1), end = c(2022, 12))
+z23 <- window(y, start = c(2023, 1), end = c(2023, 12))
+z24 <- window(y, start = c(2024, 1), end = c(2024, 12))
+
+# Referencias de software.
+ref_R <- format(citation(), style = "text")
+ref_forecast <- format(citation("forecast"), style = "text")
+ref_ggplot2 <- format(citation("ggplot2"), style = "text")
+ref_knitr <- format(citation("knitr"), style = "text")
+ref_lmtest <- format(citation("lmtest"), style = "text")
+ref_tseries <- format(citation("tseries"), style = "text")
+```
+
+```{r}
+#| label: regresores
+#| include: false
+# Regresores: once indicadores mensuales y un indicador temporal de 2020.
+# seasonaldummy() conserva la misma categoría de referencia en el futuro.
+mes <- seasonaldummy(y)
+paso <- as.numeric(base$Año == 2020)
+W <- cbind(mes, paso = paso)
+X <- cbind(t = 1:length(y), W)
+W20 <- W[1:length(y20), ]
+X20 <- X[1:length(y20), ]
+Wf20 <- cbind(seasonaldummy(y20, h = 12), paso = rep(0, 12))
+Xf20 <- cbind(t = length(y20) + 1:12, Wf20)
+W21 <- W[1:length(y21), ]
+X21 <- X[1:length(y21), ]
+Wf21 <- cbind(seasonaldummy(y21, h = 12), paso = rep(0, 12))
+Xf21 <- cbind(t = length(y21) + 1:12, Wf21)
+W22 <- W[1:length(y22), ]
+X22 <- X[1:length(y22), ]
+Wf22 <- cbind(seasonaldummy(y22, h = 12), paso = rep(0, 12))
+Xf22 <- cbind(t = length(y22) + 1:12, Wf22)
+W23 <- W[1:length(y23), ]
+X23 <- X[1:length(y23), ]
+Wf23 <- cbind(seasonaldummy(y23, h = 12), paso = rep(0, 12))
+Xf23 <- cbind(t = length(y23) + 1:12, Wf23)
+W24 <- W[1:length(y), ]
+X24 <- X[1:length(y), ]
+Wf24 <- cbind(seasonaldummy(y, h = 12), paso = rep(0, 12))
+Xf24 <- cbind(t = length(y) + 1:12, Wf24)
+```
+
+```{r}
+#| label: identificacion
+#| include: false
+# Diferencias de la primera ventana de entrenamiento.
+d1 <- diff(y20)
+D1 <- diff(y20, lag = 12)
+dD <- diff(D1)
+
+# Regresión preliminar y residuos para identificar la dependencia.
+paso20 <- paso[1:length(y20)]
+pre <- tslm(y20 ~ trend + season + paso20)
+e <- residuals(pre)
+```
+
+```{r}
+#| label: ajustes-s
+#| include: false
+s1_20 <- hw(y20, seasonal = "additive", h = 12)
+s2_20 <- hw(y20, seasonal = "multiplicative", h = 12)
+s3_20 <- hw(y20, seasonal = "multiplicative", damped = TRUE, h = 12)
+s1_21 <- hw(y21, seasonal = "additive", h = 12)
+s2_21 <- hw(y21, seasonal = "multiplicative", h = 12)
+s3_21 <- hw(y21, seasonal = "multiplicative", damped = TRUE, h = 12)
+s1_22 <- hw(y22, seasonal = "additive", h = 12)
+s2_22 <- hw(y22, seasonal = "multiplicative", h = 12)
+s3_22 <- hw(y22, seasonal = "multiplicative", damped = TRUE, h = 12)
+s1_23 <- hw(y23, seasonal = "additive", h = 12)
+s2_23 <- hw(y23, seasonal = "multiplicative", h = 12)
+s3_23 <- hw(y23, seasonal = "multiplicative", damped = TRUE, h = 12)
+
+val_s <- data.frame(
+  Modelo = c("HW aditivo",
+             "HW multiplicativo",
+             "HW multiplicativo amortiguado"),
+  RMSE_2021 = c(accuracy(s1_20, z21)["Test set", "RMSE"],
+               accuracy(s2_20, z21)["Test set", "RMSE"],
+               accuracy(s3_20, z21)["Test set", "RMSE"]),
+  RMSE_2022 = c(accuracy(s1_21, z22)["Test set", "RMSE"],
+               accuracy(s2_21, z22)["Test set", "RMSE"],
+               accuracy(s3_21, z22)["Test set", "RMSE"]),
+  RMSE_2023 = c(accuracy(s1_22, z23)["Test set", "RMSE"],
+               accuracy(s2_22, z23)["Test set", "RMSE"],
+               accuracy(s3_22, z23)["Test set", "RMSE"]))
+val_s$RMSE_medio <- rowMeans(val_s[, 2:4])
+sel_s <- which.min(val_s$RMSE_medio)
+f_s <- list(s1_23, s2_23, s3_23)[[sel_s]]
+m_s <- f_s$model
+```
+
+```{r}
+#| label: ajustes-a
+#| include: false
+a1_20 <- Arima(y20, order = c(0,1,1), seasonal = c(0,1,1), method = "ML")
+fa1_20 <- forecast(a1_20, h = 12)
+a2_20 <- Arima(y20, order = c(1,1,1), seasonal = c(0,1,1), method = "ML")
+fa2_20 <- forecast(a2_20, h = 12)
+a3_20 <- Arima(y20, order = c(1,1,0), seasonal = c(1,1,0), method = "ML")
+fa3_20 <- forecast(a3_20, h = 12)
+a4_20 <- Arima(y20, order = c(0,1,1), seasonal = c(0,1,1), lambda = 0, method = "ML")
+fa4_20 <- forecast(a4_20, h = 12)
+a5_20 <- Arima(y20, order = c(0,1,1), seasonal = c(1,0,0), include.drift = TRUE, method = "ML")
+fa5_20 <- forecast(a5_20, h = 12)
+a1_21 <- Arima(y21, order = c(0,1,1), seasonal = c(0,1,1), method = "ML")
+fa1_21 <- forecast(a1_21, h = 12)
+a2_21 <- Arima(y21, order = c(1,1,1), seasonal = c(0,1,1), method = "ML")
+fa2_21 <- forecast(a2_21, h = 12)
+a3_21 <- Arima(y21, order = c(1,1,0), seasonal = c(1,1,0), method = "ML")
+fa3_21 <- forecast(a3_21, h = 12)
+a4_21 <- Arima(y21, order = c(0,1,1), seasonal = c(0,1,1), lambda = 0, method = "ML")
+fa4_21 <- forecast(a4_21, h = 12)
+a5_21 <- Arima(y21, order = c(0,1,1), seasonal = c(1,0,0), include.drift = TRUE, method = "ML")
+fa5_21 <- forecast(a5_21, h = 12)
+a1_22 <- Arima(y22, order = c(0,1,1), seasonal = c(0,1,1), method = "ML")
+fa1_22 <- forecast(a1_22, h = 12)
+a2_22 <- Arima(y22, order = c(1,1,1), seasonal = c(0,1,1), method = "ML")
+fa2_22 <- forecast(a2_22, h = 12)
+a3_22 <- Arima(y22, order = c(1,1,0), seasonal = c(1,1,0), method = "ML")
+fa3_22 <- forecast(a3_22, h = 12)
+a4_22 <- Arima(y22, order = c(0,1,1), seasonal = c(0,1,1), lambda = 0, method = "ML")
+fa4_22 <- forecast(a4_22, h = 12)
+a5_22 <- Arima(y22, order = c(0,1,1), seasonal = c(1,0,0), include.drift = TRUE, method = "ML")
+fa5_22 <- forecast(a5_22, h = 12)
+a1_23 <- Arima(y23, order = c(0,1,1), seasonal = c(0,1,1), method = "ML")
+fa1_23 <- forecast(a1_23, h = 12)
+a2_23 <- Arima(y23, order = c(1,1,1), seasonal = c(0,1,1), method = "ML")
+fa2_23 <- forecast(a2_23, h = 12)
+a3_23 <- Arima(y23, order = c(1,1,0), seasonal = c(1,1,0), method = "ML")
+fa3_23 <- forecast(a3_23, h = 12)
+a4_23 <- Arima(y23, order = c(0,1,1), seasonal = c(0,1,1), lambda = 0, method = "ML")
+fa4_23 <- forecast(a4_23, h = 12)
+a5_23 <- Arima(y23, order = c(0,1,1), seasonal = c(1,0,0), include.drift = TRUE, method = "ML")
+fa5_23 <- forecast(a5_23, h = 12)
+
+val_a <- data.frame(
+  Modelo = c("SARIMA(0,1,1)(0,1,1)",
+             "SARIMA(1,1,1)(0,1,1)",
+             "SARIMA(1,1,0)(1,1,0)",
+             "SARIMA(0,1,1)(0,1,1) log",
+             "SARIMA(0,1,1)(1,0,0) con deriva"),
+  RMSE_2021 = c(accuracy(fa1_20, z21)["Test set", "RMSE"],
+               accuracy(fa2_20, z21)["Test set", "RMSE"],
+               accuracy(fa3_20, z21)["Test set", "RMSE"],
+               accuracy(fa4_20, z21)["Test set", "RMSE"],
+               accuracy(fa5_20, z21)["Test set", "RMSE"]),
+  RMSE_2022 = c(accuracy(fa1_21, z22)["Test set", "RMSE"],
+               accuracy(fa2_21, z22)["Test set", "RMSE"],
+               accuracy(fa3_21, z22)["Test set", "RMSE"],
+               accuracy(fa4_21, z22)["Test set", "RMSE"],
+               accuracy(fa5_21, z22)["Test set", "RMSE"]),
+  RMSE_2023 = c(accuracy(fa1_22, z23)["Test set", "RMSE"],
+               accuracy(fa2_22, z23)["Test set", "RMSE"],
+               accuracy(fa3_22, z23)["Test set", "RMSE"],
+               accuracy(fa4_22, z23)["Test set", "RMSE"],
+               accuracy(fa5_22, z23)["Test set", "RMSE"]))
+val_a$RMSE_medio <- rowMeans(val_a[, 2:4])
+val_a$p_LB <- c(Box.test(residuals(a1_23), lag = 24, type = "Ljung-Box",
+             fitdf = sum(a1_23$arma[1:4]))$p.value,
+  Box.test(residuals(a2_23), lag = 24, type = "Ljung-Box",
+             fitdf = sum(a2_23$arma[1:4]))$p.value,
+  Box.test(residuals(a3_23), lag = 24, type = "Ljung-Box",
+             fitdf = sum(a3_23$arma[1:4]))$p.value,
+  Box.test(residuals(a4_23), lag = 24, type = "Ljung-Box",
+             fitdf = sum(a4_23$arma[1:4]))$p.value,
+  Box.test(residuals(a5_23), lag = 24, type = "Ljung-Box",
+             fitdf = sum(a5_23$arma[1:4]))$p.value)
+# Si hay candidatos sin evidencia de autocorrelación conjunta, se priorizan.
+sel_a <- which.min(val_a$RMSE_medio)
+if (any(val_a$p_LB >= 0.05)) {
+  sel_a <- which.min(ifelse(val_a$p_LB >= 0.05, val_a$RMSE_medio, Inf))
+}
+f_a <- list(fa1_23, fa2_23, fa3_23, fa4_23, fa5_23)[[sel_a]]
+m_a <- list(a1_23, a2_23, a3_23, a4_23, a5_23)[[sel_a]]
+```
+
+```{r}
+#| label: ajustes-r
+#| include: false
+r1_20 <- tslm(y20 ~ trend)
+fr1_20 <- forecast(r1_20, h = 12)
+r2_20 <- tslm(y20 ~ trend + season)
+fr2_20 <- forecast(r2_20, h = 12)
+r3_20 <- tslm(y20 ~ trend + I(trend^2) + season)
+fr3_20 <- forecast(r3_20, h = 12)
+r4_20 <- tslm(y20 ~ trend + I(trend^2) + season, lambda = 0)
+fr4_20 <- forecast(r4_20, h = 12)
+r1_21 <- tslm(y21 ~ trend)
+fr1_21 <- forecast(r1_21, h = 12)
+r2_21 <- tslm(y21 ~ trend + season)
+fr2_21 <- forecast(r2_21, h = 12)
+r3_21 <- tslm(y21 ~ trend + I(trend^2) + season)
+fr3_21 <- forecast(r3_21, h = 12)
+r4_21 <- tslm(y21 ~ trend + I(trend^2) + season, lambda = 0)
+fr4_21 <- forecast(r4_21, h = 12)
+r1_22 <- tslm(y22 ~ trend)
+fr1_22 <- forecast(r1_22, h = 12)
+r2_22 <- tslm(y22 ~ trend + season)
+fr2_22 <- forecast(r2_22, h = 12)
+r3_22 <- tslm(y22 ~ trend + I(trend^2) + season)
+fr3_22 <- forecast(r3_22, h = 12)
+r4_22 <- tslm(y22 ~ trend + I(trend^2) + season, lambda = 0)
+fr4_22 <- forecast(r4_22, h = 12)
+r1_23 <- tslm(y23 ~ trend)
+fr1_23 <- forecast(r1_23, h = 12)
+r2_23 <- tslm(y23 ~ trend + season)
+fr2_23 <- forecast(r2_23, h = 12)
+r3_23 <- tslm(y23 ~ trend + I(trend^2) + season)
+fr3_23 <- forecast(r3_23, h = 12)
+r4_23 <- tslm(y23 ~ trend + I(trend^2) + season, lambda = 0)
+fr4_23 <- forecast(r4_23, h = 12)
+
+val_r <- data.frame(
+  Modelo = c("Tendencia",
+             "Tendencia y mes",
+             "Tendencia cuadrática y mes",
+             "Tendencia cuadrática y mes (log)"),
+  RMSE_2021 = c(accuracy(fr1_20, z21)["Test set", "RMSE"],
+               accuracy(fr2_20, z21)["Test set", "RMSE"],
+               accuracy(fr3_20, z21)["Test set", "RMSE"],
+               accuracy(fr4_20, z21)["Test set", "RMSE"]),
+  RMSE_2022 = c(accuracy(fr1_21, z22)["Test set", "RMSE"],
+               accuracy(fr2_21, z22)["Test set", "RMSE"],
+               accuracy(fr3_21, z22)["Test set", "RMSE"],
+               accuracy(fr4_21, z22)["Test set", "RMSE"]),
+  RMSE_2023 = c(accuracy(fr1_22, z23)["Test set", "RMSE"],
+               accuracy(fr2_22, z23)["Test set", "RMSE"],
+               accuracy(fr3_22, z23)["Test set", "RMSE"],
+               accuracy(fr4_22, z23)["Test set", "RMSE"]))
+val_r$RMSE_medio <- rowMeans(val_r[, 2:4])
+sel_r <- which.min(val_r$RMSE_medio)
+f_r <- list(fr1_23, fr2_23, fr3_23, fr4_23)[[sel_r]]
+m_r <- list(r1_23, r2_23, r3_23, r4_23)[[sel_r]]
+```
+
+```{r}
+#| label: ajustes-d
+#| include: false
+d1_20 <- Arima(y20, order = c(1,0,0), xreg = X20, method = "ML")
+fd1_20 <- forecast(d1_20, h = 12, xreg = Xf20)
+d2_20 <- Arima(y20, order = c(2,0,0), xreg = X20, method = "ML")
+fd2_20 <- forecast(d2_20, h = 12, xreg = Xf20)
+d3_20 <- Arima(y20, order = c(0,1,0), xreg = W20, include.drift = TRUE, method = "ML")
+fd3_20 <- forecast(d3_20, h = 12, xreg = Wf20)
+d4_20 <- Arima(y20, order = c(0,1,1), xreg = W20, include.drift = TRUE, method = "ML")
+fd4_20 <- forecast(d4_20, h = 12, xreg = Wf20)
+d5_20 <- Arima(y20, order = c(0,1,1), xreg = W20, include.drift = TRUE, lambda = 0, method = "ML")
+fd5_20 <- forecast(d5_20, h = 12, xreg = Wf20)
+d6_20 <- Arima(y20, order = c(0,1,1), seasonal = c(1,0,0), xreg = W20, include.drift = TRUE, method = "ML")
+fd6_20 <- forecast(d6_20, h = 12, xreg = Wf20)
+d1_21 <- Arima(y21, order = c(1,0,0), xreg = X21, method = "ML")
+fd1_21 <- forecast(d1_21, h = 12, xreg = Xf21)
+d2_21 <- Arima(y21, order = c(2,0,0), xreg = X21, method = "ML")
+fd2_21 <- forecast(d2_21, h = 12, xreg = Xf21)
+d3_21 <- Arima(y21, order = c(0,1,0), xreg = W21, include.drift = TRUE, method = "ML")
+fd3_21 <- forecast(d3_21, h = 12, xreg = Wf21)
+d4_21 <- Arima(y21, order = c(0,1,1), xreg = W21, include.drift = TRUE, method = "ML")
+fd4_21 <- forecast(d4_21, h = 12, xreg = Wf21)
+d5_21 <- Arima(y21, order = c(0,1,1), xreg = W21, include.drift = TRUE, lambda = 0, method = "ML")
+fd5_21 <- forecast(d5_21, h = 12, xreg = Wf21)
+d6_21 <- Arima(y21, order = c(0,1,1), seasonal = c(1,0,0), xreg = W21, include.drift = TRUE, method = "ML")
+fd6_21 <- forecast(d6_21, h = 12, xreg = Wf21)
+d1_22 <- Arima(y22, order = c(1,0,0), xreg = X22, method = "ML")
+fd1_22 <- forecast(d1_22, h = 12, xreg = Xf22)
+d2_22 <- Arima(y22, order = c(2,0,0), xreg = X22, method = "ML")
+fd2_22 <- forecast(d2_22, h = 12, xreg = Xf22)
+d3_22 <- Arima(y22, order = c(0,1,0), xreg = W22, include.drift = TRUE, method = "ML")
+fd3_22 <- forecast(d3_22, h = 12, xreg = Wf22)
+d4_22 <- Arima(y22, order = c(0,1,1), xreg = W22, include.drift = TRUE, method = "ML")
+fd4_22 <- forecast(d4_22, h = 12, xreg = Wf22)
+d5_22 <- Arima(y22, order = c(0,1,1), xreg = W22, include.drift = TRUE, lambda = 0, method = "ML")
+fd5_22 <- forecast(d5_22, h = 12, xreg = Wf22)
+d6_22 <- Arima(y22, order = c(0,1,1), seasonal = c(1,0,0), xreg = W22, include.drift = TRUE, method = "ML")
+fd6_22 <- forecast(d6_22, h = 12, xreg = Wf22)
+d1_23 <- Arima(y23, order = c(1,0,0), xreg = X23, method = "ML")
+fd1_23 <- forecast(d1_23, h = 12, xreg = Xf23)
+d2_23 <- Arima(y23, order = c(2,0,0), xreg = X23, method = "ML")
+fd2_23 <- forecast(d2_23, h = 12, xreg = Xf23)
+d3_23 <- Arima(y23, order = c(0,1,0), xreg = W23, include.drift = TRUE, method = "ML")
+fd3_23 <- forecast(d3_23, h = 12, xreg = Wf23)
+d4_23 <- Arima(y23, order = c(0,1,1), xreg = W23, include.drift = TRUE, method = "ML")
+fd4_23 <- forecast(d4_23, h = 12, xreg = Wf23)
+d5_23 <- Arima(y23, order = c(0,1,1), xreg = W23, include.drift = TRUE, lambda = 0, method = "ML")
+fd5_23 <- forecast(d5_23, h = 12, xreg = Wf23)
+d6_23 <- Arima(y23, order = c(0,1,1), seasonal = c(1,0,0), xreg = W23, include.drift = TRUE, method = "ML")
+fd6_23 <- forecast(d6_23, h = 12, xreg = Wf23)
+
+val_d <- data.frame(
+  Modelo = c("Tendencia, mes y 2020; AR(1)",
+             "Tendencia, mes y 2020; AR(2)",
+             "Mes, 2020 y ARIMA(0,1,0) + deriva",
+             "Mes, 2020 y ARIMA(0,1,1) + deriva",
+             "Mes, 2020 y ARIMA(0,1,1) + deriva (log)",
+             "Mes, 2020 y SARIMA(0,1,1)(1,0,0) + deriva"),
+  RMSE_2021 = c(accuracy(fd1_20, z21)["Test set", "RMSE"],
+               accuracy(fd2_20, z21)["Test set", "RMSE"],
+               accuracy(fd3_20, z21)["Test set", "RMSE"],
+               accuracy(fd4_20, z21)["Test set", "RMSE"],
+               accuracy(fd5_20, z21)["Test set", "RMSE"],
+               accuracy(fd6_20, z21)["Test set", "RMSE"]),
+  RMSE_2022 = c(accuracy(fd1_21, z22)["Test set", "RMSE"],
+               accuracy(fd2_21, z22)["Test set", "RMSE"],
+               accuracy(fd3_21, z22)["Test set", "RMSE"],
+               accuracy(fd4_21, z22)["Test set", "RMSE"],
+               accuracy(fd5_21, z22)["Test set", "RMSE"],
+               accuracy(fd6_21, z22)["Test set", "RMSE"]),
+  RMSE_2023 = c(accuracy(fd1_22, z23)["Test set", "RMSE"],
+               accuracy(fd2_22, z23)["Test set", "RMSE"],
+               accuracy(fd3_22, z23)["Test set", "RMSE"],
+               accuracy(fd4_22, z23)["Test set", "RMSE"],
+               accuracy(fd5_22, z23)["Test set", "RMSE"],
+               accuracy(fd6_22, z23)["Test set", "RMSE"]))
+val_d$RMSE_medio <- rowMeans(val_d[, 2:4])
+val_d$p_LB <- c(Box.test(residuals(d1_23), lag = 24, type = "Ljung-Box",
+             fitdf = sum(d1_23$arma[1:4]))$p.value,
+  Box.test(residuals(d2_23), lag = 24, type = "Ljung-Box",
+             fitdf = sum(d2_23$arma[1:4]))$p.value,
+  Box.test(residuals(d3_23), lag = 24, type = "Ljung-Box",
+             fitdf = sum(d3_23$arma[1:4]))$p.value,
+  Box.test(residuals(d4_23), lag = 24, type = "Ljung-Box",
+             fitdf = sum(d4_23$arma[1:4]))$p.value,
+  Box.test(residuals(d5_23), lag = 24, type = "Ljung-Box",
+             fitdf = sum(d5_23$arma[1:4]))$p.value,
+  Box.test(residuals(d6_23), lag = 24, type = "Ljung-Box",
+             fitdf = sum(d6_23$arma[1:4]))$p.value)
+# Si hay candidatos sin evidencia de autocorrelación conjunta, se priorizan.
+sel_d <- which.min(val_d$RMSE_medio)
+if (any(val_d$p_LB >= 0.05)) {
+  sel_d <- which.min(ifelse(val_d$p_LB >= 0.05, val_d$RMSE_medio, Inf))
+}
+f_d <- list(fd1_23, fd2_23, fd3_23, fd4_23, fd5_23, fd6_23)[[sel_d]]
+m_d <- list(d1_23, d2_23, d3_23, d4_23, d5_23, d6_23)[[sel_d]]
+```
+
+```{r}
+#| label: comparacion
+#| include: false
+# Comparación en los mismos doce meses de 2024.
+naive24 <- snaive(y23, h = 12)
+err <- rbind(accuracy(f_s, z24)["Test set", c("RMSE", "MAE", "MAPE", "ME")],
+             accuracy(f_a, z24)["Test set", c("RMSE", "MAE", "MAPE", "ME")],
+             accuracy(f_r, z24)["Test set", c("RMSE", "MAE", "MAPE", "ME")],
+             accuracy(f_d, z24)["Test set", c("RMSE", "MAE", "MAPE", "ME")])
+finalistas <- data.frame(
+  Familia = c("Suavizamiento", "SARIMA", "Regresión", "Regresión dinámica"),
+  Modelo = c(val_s$Modelo[sel_s], val_a$Modelo[sel_a],
+             val_r$Modelo[sel_r], val_d$Modelo[sel_d]),
+  RMSE = err[, "RMSE"], MAE = err[, "MAE"], MAPE = err[, "MAPE"],
+  ME = err[, "ME"])
+finalistas$Validacion <- c(val_s$RMSE_medio[sel_s], val_a$RMSE_medio[sel_a],
+                         val_r$RMSE_medio[sel_r], val_d$RMSE_medio[sel_d])
+
+# Diagnósticos de innovaciones; ajuste de grados de libertad para ARIMA.
+lb_s <- Box.test(na.omit(residuals(m_s)), lag = 24, type = "Ljung-Box")
+lb_a <- Box.test(na.omit(residuals(m_a, type = "innovation")), lag = 24,
+                 type = "Ljung-Box", fitdf = sum(m_a$arma[1:4]))
+lb_r <- bgtest(m_r, order = 24)
+lb_d <- Box.test(na.omit(residuals(m_d, type = "innovation")), lag = 24,
+                 type = "Ljung-Box", fitdf = sum(m_d$arma[1:4]))
+finalistas$p_residuos <- c(lb_s$p.value, lb_a$p.value, lb_r$p.value, lb_d$p.value)
+finalistas$p_normalidad <- c(
+  shapiro.test(na.omit(residuals(m_s)))$p.value,
+  shapiro.test(na.omit(residuals(m_a, type = "innovation")))$p.value,
+  shapiro.test(na.omit(residuals(m_r)))$p.value,
+  shapiro.test(na.omit(residuals(m_d, type = "innovation")))$p.value)
+finalistas$Cobertura95 <- 100 * c(
+  mean(z24 >= f_s$lower[,2] & z24 <= f_s$upper[,2]),
+  mean(z24 >= f_a$lower[,2] & z24 <= f_a$upper[,2]),
+  mean(z24 >= f_r$lower[,2] & z24 <= f_r$upper[,2]),
+  mean(z24 >= f_d$lower[,2] & z24 <= f_d$upper[,2]))
+ranking <- finalistas[order(finalistas$RMSE), ]
+ganador <- which.min(finalistas$RMSE)
+rmse_naive <- accuracy(naive24, z24)["Test set", "RMSE"]
+texto_lb <- if (ranking$p_residuos[1] < 0.05) {
+  "se detecta autocorrelación residual conjunta; la recomendación queda condicionada por esta limitación"
+} else {
+  "no se encontró evidencia suficiente de autocorrelación conjunta hasta el rezago 24, aunque esto no demuestra independencia"
+}
+texto_ref <- if (ranking$RMSE[1] < rmse_naive) {
+  "superó al método ingenuo estacional"
+} else {
+  "no superó al método ingenuo estacional"
+}
+```
+
+```{r}
+#| label: reajuste-final
+#| include: false
+s1_24 <- hw(y, seasonal = "additive", h = 12)
+s2_24 <- hw(y, seasonal = "multiplicative", h = 12)
+s3_24 <- hw(y, seasonal = "multiplicative", damped = TRUE, h = 12)
+fin_s <- list(s1_24, s2_24, s3_24)[[sel_s]]
+a1_24 <- Arima(y, order = c(0,1,1), seasonal = c(0,1,1), method = "ML")
+fa1_24 <- forecast(a1_24, h = 12)
+a2_24 <- Arima(y, order = c(1,1,1), seasonal = c(0,1,1), method = "ML")
+fa2_24 <- forecast(a2_24, h = 12)
+a3_24 <- Arima(y, order = c(1,1,0), seasonal = c(1,1,0), method = "ML")
+fa3_24 <- forecast(a3_24, h = 12)
+a4_24 <- Arima(y, order = c(0,1,1), seasonal = c(0,1,1), lambda = 0, method = "ML")
+fa4_24 <- forecast(a4_24, h = 12)
+a5_24 <- Arima(y, order = c(0,1,1), seasonal = c(1,0,0), include.drift = TRUE, method = "ML")
+fa5_24 <- forecast(a5_24, h = 12)
+fin_a <- list(fa1_24, fa2_24, fa3_24, fa4_24, fa5_24)[[sel_a]]
+r1_24 <- tslm(y ~ trend)
+fr1_24 <- forecast(r1_24, h = 12)
+r2_24 <- tslm(y ~ trend + season)
+fr2_24 <- forecast(r2_24, h = 12)
+r3_24 <- tslm(y ~ trend + I(trend^2) + season)
+fr3_24 <- forecast(r3_24, h = 12)
+r4_24 <- tslm(y ~ trend + I(trend^2) + season, lambda = 0)
+fr4_24 <- forecast(r4_24, h = 12)
+fin_r <- list(fr1_24, fr2_24, fr3_24, fr4_24)[[sel_r]]
+d1_24 <- Arima(y, order = c(1,0,0), xreg = X24, method = "ML")
+fd1_24 <- forecast(d1_24, h = 12, xreg = Xf24)
+d2_24 <- Arima(y, order = c(2,0,0), xreg = X24, method = "ML")
+fd2_24 <- forecast(d2_24, h = 12, xreg = Xf24)
+d3_24 <- Arima(y, order = c(0,1,0), xreg = W24, include.drift = TRUE, method = "ML")
+fd3_24 <- forecast(d3_24, h = 12, xreg = Wf24)
+d4_24 <- Arima(y, order = c(0,1,1), xreg = W24, include.drift = TRUE, method = "ML")
+fd4_24 <- forecast(d4_24, h = 12, xreg = Wf24)
+d5_24 <- Arima(y, order = c(0,1,1), xreg = W24, include.drift = TRUE, lambda = 0, method = "ML")
+fd5_24 <- forecast(d5_24, h = 12, xreg = Wf24)
+d6_24 <- Arima(y, order = c(0,1,1), seasonal = c(1,0,0), xreg = W24, include.drift = TRUE, method = "ML")
+fd6_24 <- forecast(d6_24, h = 12, xreg = Wf24)
+fin_d <- list(fd1_24, fd2_24, fd3_24, fd4_24, fd5_24, fd6_24)[[sel_d]]
+f_final <- list(fin_s, fin_a, fin_r, fin_d)[[ganador]]
+m_final <- f_final$model
+tabla2025 <- data.frame(Mes = meses, Pronóstico = as.numeric(f_final$mean),
+                       LI80 = as.numeric(f_final$lower[,1]), LS80 = as.numeric(f_final$upper[,1]),
+                       LI95 = as.numeric(f_final$lower[,2]), LS95 = as.numeric(f_final$upper[,2]))
+```
+
+**Universidad de Costa Rica — Escuela de Estadística**  
+**Curso:** XS-0127 Análisis de Series Temporales
+
+# Resumen
+
+Se estudia la demanda máxima mensual de electricidad en Costa Rica con el propósito de identificar un modelo que permita anticipar los niveles de potencia requeridos durante los siguientes doce meses. Se utilizaron 300 observaciones entre enero de 2000 y diciembre de 2024, obtenidas de ARESEP, con una corrección de los registros de 2020 a partir de información del CENCE. La tendencia y la estacionalidad observadas motivaron la comparación de cuatro familias: suavizamiento exponencial, SARIMA, regresión y regresión dinámica. Se examinaron las diferencias y las funciones de autocorrelación y autocorrelación parcial para identificar los órdenes de los modelos ARIMA, incluyendo los errores de las regresiones. Se seleccionó un finalista por familia mediante pronósticos anuales de 2021 a 2023 y, para los modelos ARIMA, se priorizó un diagnóstico residual satisfactorio. Al comparar los finalistas en 2024, el menor RMSE correspondió a **`r ranking$Modelo[1]`**, con `r round(ranking$RMSE[1],2)` MW de RMSE y un MAE de `r round(ranking$MAE[1],2)` MW. Se revisaron los residuos y la cobertura de los intervalos para valorar las limitaciones de la recomendación. Por último, se reajustó el modelo seleccionado con toda la serie y se obtuvo una proyección mensual para 2025. 
+
+**Palabras clave:** demanda máxima eléctrica; pronóstico; SARIMA; suavizamiento exponencial; regresión dinámica.
+
+# Introducción
+
+La demanda máxima de electricidad expresa la mayor potencia requerida por el sistema durante un intervalo específico. Se mide en megavatios (MW) y no debe confundirse con el consumo mensual acumulado de energía, cuya unidad habitual es el megavatio-hora (MWh). Mientras que el consumo describe cuánta energía se utilizó, la demanda máxima permite identificar los niveles de potencia que deben atenderse en los periodos de mayor exigencia. Por este motivo, anticipar sus cambios resulta relevante para la planificación y operación del sistema eléctrico.
+
+La predicción de demanda eléctrica se ha abordado con distintos métodos estadísticos. Chikobvu y Sigauke (2012) estudiaron la demanda máxima diaria de Sudáfrica mediante SARIMA y regresión con errores SARIMA. Por su parte, Pełka (2023) analizó series mensuales de demanda eléctrica con métodos estadísticos basados en patrones. Aunque la periodicidad y el contexto de esas aplicaciones difieren del presente estudio, ambas investigaciones muestran la importancia de representar adecuadamente la estacionalidad y de evaluar la precisión de los pronósticos.
+
+El estudio utiliza la serie de demanda máxima mensual publicada por la Autoridad Reguladora de los Servicios Públicos (ARESEP), con una sustitución documentada de los valores de 2020 basada en los informes del CENCE. La selección no parte de la premisa de que exista un modelo universalmente superior: diferentes métodos pueden responder de forma distinta a cambios en la tendencia, estacionalidad y correlación serial.
+
+El objetivo general es comparar modelos de las cuatro familias requeridas y recomendar el que ofrezca mejor capacidad predictiva para un horizonte de doce meses. En particular, interesa caracterizar la serie, escoger un finalista dentro de cada familia, contrastar sus errores fuera de muestra y examinar si los residuos respaldan los supuestos de la modelación. Se utiliza la metodología y las funciones ilustradas en los temas de suavizamiento, regresión, ARIMA y regresión dinámica del material de Shu Wei Chou Chen.
+
+# Metodología
+
+## Datos y preparación
+
+La serie se obtuvo del portal de datos abiertos de ARESEP (s. f.). La variable de interés corresponde al máximo mensual de potencia eléctrica, medido en MW. El archivo original contenía una repetición del valor máximo de 2020 en varios meses de ese año. Con autorización del docente, se sustituyeron los doce registros de 2020 por los máximos mensuales publicados por el CENCE (2020). No se trata de valores extrapolados mediante un modelo, sino de registros observados en una segunda fuente oficial. El resto de la serie se mantuvo sin modificaciones. No se compararon las dos versiones de la base, dado que el interés es pronosticar la serie corregida.
+
+El archivo se ordenó cronológicamente y se construyó una serie de frecuencia 12. Se contó con `r length(y)` observaciones, `r sum(is.na(y))` valores faltantes y `r length(unique(paste(base$Año,base$mes)))` combinaciones distintas de año y mes. Para orientar la modelación se examinó la tendencia, la estacionalidad, la descomposición aditiva y los correlogramas de la serie. La identificación de los modelos se realizó con datos hasta diciembre de 2020, de modo que no se utilizaran los valores de los años destinados a la validación para establecer nuevos candidatos en este documento. En etapas previas del proyecto ya se habían examinado datos posteriores, por lo que la evaluación de 2024 debe interpretarse como una comparación retrospectiva y no como una prueba completamente inédita.
+
+## Identificación y ajuste
+
+Se siguieron los procedimientos del curso de Chou Chen (s. f.). Para ARIMA se examinaron la serie en niveles, la diferencia regular, la diferencia estacional y ambas diferencias. Se consideró también la transformación logarítmica en algunos candidatos, como en los ejemplos del curso. La diferenciación se usó para tratar la persistencia de la media y la estacionalidad; la ACF y la PACF orientaron los órdenes autorregresivos y de medias móviles. La prueba aumentada de Dickey-Fuller (ADF) se utilizó como complemento para estudiar la presencia de una raíz unitaria. Los coeficientes de ARIMA se estimaron por máxima verosimilitud. En regresión dinámica primero se ajustó la parte determinística y se examinaron sus residuos antes de proponer estructuras ARMA o ARIMA para los errores.
+
+Se utilizó un indicador temporal igual a uno durante 2020 y cero en los demás meses para recoger un posible cambio transitorio asociado con ese año, sin atribuirlo causalmente a la pandemia. Para pronosticar se supuso que el indicador volvía a cero a partir de 2021. Los regresores de calendario se conocen para cualquier fecha futura. No se incorporaron covariables externas, pues su disponibilidad futura tendría que garantizarse y la presencia de autocorrelación residual no constituye por sí sola evidencia de que falte una variable explicativa.
+
+## Especificaciones de los finalistas
+
+Las expresiones siguientes describen las especificaciones seleccionadas con la validación de 2021 a 2023. Se presentan antes de discutir sus resultados para identificar exactamente qué se comparó.
+
+### Suavizamiento exponencial
+
+Finalista: **`r val_s$Modelo[sel_s]`**.
+
+Holt-Winters actualiza el nivel $\ell_t$, la pendiente $b_t$ y el componente estacional $s_t$. Se consideraron las versiones aditiva, multiplicativa y multiplicativa amortiguada; en esta última, $\phi$ reduce el crecimiento proyectado conforme aumenta el horizonte. La ecuación corresponde a $h=1,\ldots,12$.
+
+```{r}
+#| label: ecuacion-s
+#| results: asis
+ecuacion <- c("\\widehat{Y}_{t+h|t}=\\ell_t+hb_t+s_{t+h-12}",
+              "\\widehat{Y}_{t+h|t}=(\\ell_t+hb_t)s_{t+h-12}",
+              "\\widehat{Y}_{t+h|t}=(\\ell_t+\\sum_{j=1}^{h}\\phi^j b_t)s_{t+h-12}")
+cat("$$\n", ecuacion[sel_s], "\n$$ {#eq-s}\n", sep = "")
+```
+
+### ARIMA estacional
+
+Finalista: **`r val_a$Modelo[sel_a]`**.
+
+$B$ es el operador de rezago, $a_t$ la innovación, y $\phi$, $\theta$, $\Phi$ y $\Theta$ los parámetros no estacionales y estacionales. Se compararon órdenes de diferenciación y estructuras de corto plazo y estacionales, utilizando los signos de los coeficientes tal como los reporta `Arima()` de R.
+
+```{r}
+#| label: ecuacion-a
+#| results: asis
+ecuacion <- c("(1-B)(1-B^{12})Y_t=(1+\\theta B)(1+\\Theta B^{12})a_t",
+              "(1-\\phi B)(1-B)(1-B^{12})Y_t=(1+\\theta B)(1+\\Theta B^{12})a_t",
+              "(1-\\phi B)(1-\\Phi B^{12})(1-B)(1-B^{12})Y_t=a_t",
+              "(1-B)(1-B^{12})\\log Y_t=(1+\\theta B)(1+\\Theta B^{12})a_t",
+              "(1-\\Phi B^{12})(1-B)(Y_t-\\delta t)=(1+\\theta B)a_t")
+cat("$$\n", ecuacion[sel_a], "\n$$ {#eq-a}\n", sep = "")
+```
+
+### Regresión
+
+Finalista: **`r val_r$Modelo[sel_r]`**.
+
+La regresión utiliza el tiempo y, según el caso, su cuadrado y once indicadores mensuales. Enero es la referencia para `tslm()`. El supuesto de errores no correlacionados se revisa en los resultados; si falla, no se utilizan los contrastes ordinarios de coeficientes como evidencia inferencial.
+
+```{r}
+#| label: ecuacion-r
+#| results: asis
+ecuacion <- c("Y_t=\\beta_0+\\beta_1t+\\varepsilon_t",
+              "Y_t=\\beta_0+\\beta_1t+\\sum_{j=2}^{12}\\gamma_j I_{j,t}+\\varepsilon_t",
+              "Y_t=\\beta_0+\\beta_1t+\\beta_2t^2+\\sum_{j=2}^{12}\\gamma_j I_{j,t}+\\varepsilon_t",
+              "\\log Y_t=\\beta_0+\\beta_1t+\\beta_2t^2+\\sum_{j=2}^{12}\\gamma_j I_{j,t}+\\varepsilon_t")
+cat("$$\n", ecuacion[sel_r], "\n$$ {#eq-r}\n", sep = "")
+```
+
+### Regresión dinámica
+
+Finalista: **`r val_d$Modelo[sel_d]`**.
+
+$S_t$ es el indicador transitorio de 2020 y los once indicadores mensuales de `seasonaldummy()` omiten diciembre. En los modelos con $d=1$ se utiliza deriva en lugar de una columna de tendencia separada; la constante del nivel no se identifica. El error $\eta_t$ incorpora la dependencia temporal y $a_t$ es la innovación.
+
+```{r}
+#| label: ecuacion-d
+#| results: asis
+ecuacion <- c("\\begin{aligned}Y_t&=\\beta_0+\\beta_1t+\\sum_{j=1}^{11}\\gamma_j I_{j,t}+\\omega S_t+\\eta_t,\\\\\\eta_t&=\\phi_1\\eta_{t-1}+a_t\\end{aligned}",
+              "\\begin{aligned}Y_t&=\\beta_0+\\beta_1t+\\sum_{j=1}^{11}\\gamma_j I_{j,t}+\\omega S_t+\\eta_t,\\\\\\eta_t&=\\phi_1\\eta_{t-1}+\\phi_2\\eta_{t-2}+a_t\\end{aligned}",
+              "\\begin{aligned}Y_t&=\\beta_1t+\\sum_{j=1}^{11}\\gamma_j I_{j,t}+\\omega S_t+\\eta_t,\\\\(1-B)\\eta_t&=a_t\\end{aligned}",
+              "\\begin{aligned}Y_t&=\\beta_1t+\\sum_{j=1}^{11}\\gamma_j I_{j,t}+\\omega S_t+\\eta_t,\\\\(1-B)\\eta_t&=(1+\\theta B)a_t\\end{aligned}",
+              "\\begin{aligned}\\log Y_t&=\\beta_1t+\\sum_{j=1}^{11}\\gamma_j I_{j,t}+\\omega S_t+\\eta_t,\\\\(1-B)\\eta_t&=(1+\\theta B)a_t\\end{aligned}",
+              "\\begin{aligned}Y_t&=\\beta_1t+\\sum_{j=1}^{11}\\gamma_j I_{j,t}+\\omega S_t+\\eta_t,\\\\(1-\\Phi B^{12})(1-B)\\eta_t&=(1+\\theta B)a_t\\end{aligned}")
+cat("$$\n", ecuacion[sel_d], "\n$$ {#eq-d}\n", sep = "")
+```
+
+## Selección y evaluación de los modelos
+
+Se ajustaron las especificaciones con información hasta diciembre de 2020, 2021 y 2022, respectivamente, y en cada caso se proyectaron los doce meses siguientes sin incorporar observaciones intermedias. Para suavizamiento y regresión se eligió el menor promedio de los tres RMSE anuales. Para SARIMA y regresión dinámica, se priorizaron las especificaciones sin evidencia conjunta de autocorrelación en el ajuste hasta 2023 (Ljung-Box a 24 rezagos, al 5 %). Entre ellas se escogió el menor RMSE medio. Si ninguna cumplía ese diagnóstico, se eligió por RMSE y se informó la limitación. Esta regla no convierte un valor p alto en una medida de precisión y no utiliza los datos de 2024 para escoger los finalistas. El criterio de información AICc se utilizó como apoyo para comparar especificaciones ARIMA en la misma escala y con el mismo orden de diferenciación, no para comparar familias ni modelos con transformaciones diferentes. La revisión residual permitió identificar limitaciones que el error predictivo por sí solo no muestra.
+
+Se reajustaron los cuatro finalistas hasta diciembre de 2023 y se compararon en 2024 con RMSE, MAE, MAPE y ME de `accuracy()`, siempre en MW para los errores absolutos. En los ajustes con `lambda = 0`, los pronósticos se obtuvieron en la escala original mediante `forecast()`; la inversión directa de la transformación representa la mediana pronosticada bajo el supuesto usual. Se incluyó el pronóstico ingenuo estacional como referencia, no como una quinta familia. El RMSE penaliza los errores grandes y se utilizó como criterio principal, dado que se estudian máximos mensuales. El ME corresponde a observado menos pronosticado: valores positivos indican subestimación. Se calculó también la proporción de observaciones de 2024 contenidas en los intervalos nominales del 95 %.
+
+Para el diagnóstico se emplearon la gráfica temporal y ACF de los residuos o innovaciones, junto con la PACF en las dos familias ARIMA, junto con Ljung-Box a 24 rezagos en suavizamiento y ARIMA (descontando los órdenes AR y MA en los modelos ARIMA). Para la regresión ordinaria se aplicó Breusch-Godfrey, como hace `checkresiduals()` para modelos `lm`. Se utilizó un nivel de significancia de 5 %. Como comprobación complementaria para interpretar los intervalos, se aplicó Shapiro-Wilk a los residuos en la escala de estimación y se examinó su histograma. No se utilizó la normalidad como criterio principal de selección. Un resultado no significativo indica ausencia de evidencia suficiente de autocorrelación conjunta, no demuestra independencia ni estacionariedad. Se revisaron los coeficientes de los modelos ARIMA con `coeftest()` y la estructura de los errores, sin agregar órdenes elevados solamente por picos aislados.
+
+Se trabajó en R con `forecast` (Hyndman y Khandakar, 2008), `ggplot2`, `lmtest`, `tseries` y `knitr`. Las referencias de los paquetes se generaron con `citation()`.
+
+# Resultados
+
+## Comportamiento de la serie
+
+```{r}
+#| label: tbl-descriptivos
+#| tbl-cap: "Resumen de la demanda máxima mensual (MW)."
+kable(data.frame(N = length(y), Media = mean(y), DE = sd(y),
+                 Mínimo = min(y), Máximo = max(y)), digits = 2)
+```
+
+```{r}
+#| label: fig-serie
+#| fig-cap: "Demanda máxima mensual de electricidad en Costa Rica, 2000–2024."
+#| fig-width: 6.5
+#| fig-height: 3.1
+autoplot(y) + labs(x = "Año", y = "Demanda máxima (MW)") + theme_minimal()
+```
+
+```{r}
+#| label: fig-mes
+#| fig-cap: "Subseries mensuales de demanda máxima."
+#| fig-width: 6.5
+#| fig-height: 3.1
+ggsubseriesplot(y) + labs(x = "Mes", y = "Demanda máxima (MW)") + theme_minimal()
+```
+
+```{r}
+#| label: fig-descomp
+#| fig-cap: "Descomposición clásica aditiva de la serie."
+#| fig-width: 6.5
+#| fig-height: 4.8
+autoplot(decompose(y, type = "additive"))
+```
+
+La serie aumenta a lo largo del periodo, aunque el crecimiento no es uniforme. El patrón mensual se mantiene visible en la descomposición. El promedio histórico más alto corresponde a `r meses[which.max(tapply(y,cycle(y),mean))]` y el más bajo a `r meses[which.min(tapply(y,cycle(y),mean))]`. La estacionalidad y el crecimiento justifican considerar modelos que incluyan ambas características. Las diferencias entre años también sugieren que una tendencia determinística única puede ser insuficiente.
+
+## Identificación de SARIMA
+
+```{r}
+#| label: fig-diferencias
+#| fig-cap: "Serie de identificación y correlogramas antes y después de diferenciar (hasta 2020)."
+#| fig-width: 6.5
+#| fig-height: 3.8
+ggtsdisplay(y20, lag.max = 36, main = "Serie en niveles")
+ggtsdisplay(d1, lag.max = 36, main = "Diferencia regular")
+ggtsdisplay(D1, lag.max = 36, main = "Diferencia estacional")
+ggtsdisplay(dD, lag.max = 36, main = "Diferencia regular y estacional")
+```
+
+```{r}
+#| label: tbl-acf
+#| tbl-cap: "Autocorrelaciones muestrales de los rezagos 1 y 12."
+kable(data.frame(Serie = c("Niveles", "Diferencia regular", "Diferencia estacional", "Ambas diferencias"),
+ ACF1 = c(acf(y20, plot=FALSE)$acf[2], acf(d1, plot=FALSE)$acf[2],
+          acf(D1, plot=FALSE)$acf[2], acf(dD, plot=FALSE)$acf[2]),
+ ACF12 = c(acf(y20, lag.max=12, plot=FALSE)$acf[13], acf(d1, lag.max=12, plot=FALSE)$acf[13],
+           acf(D1, lag.max=12, plot=FALSE)$acf[13], acf(dD, lag.max=12, plot=FALSE)$acf[13])), digits=3)
+```
+
+```{r}
+#| label: tbl-adf
+#| tbl-cap: "Contraste aumentado de Dickey-Fuller sobre los datos de identificación."
+adf0 <- adf.test(y20)
+adf1 <- adf.test(d1)
+adf12 <- adf.test(D1)
+adf13 <- adf.test(dD)
+kable(data.frame(Serie = c("Niveles", "Diferencia regular", "Diferencia estacional", "Ambas diferencias"),
+  ADF = c(adf0$statistic, adf1$statistic, adf12$statistic, adf13$statistic),
+  p = c(adf0$p.value, adf1$p.value, adf12$p.value, adf13$p.value)), digits=3)
+```
+
+La hipótesis nula de ADF es la presencia de una raíz unitaria. El contraste complementa la inspección gráfica, pero no sustituye la identificación de la estacionalidad; los valores p extremos pueden aparecer limitados a 0,01 o 0,99 por las tablas de la prueba. El correlograma en niveles presenta persistencia, con una autocorrelación de `r round(acf(y20, plot=FALSE)$acf[2],3)` en el primer rezago. En la serie con ambas diferencias, los rezagos uno y doce presentan autocorrelaciones de `r round(acf(dD,lag.max=12,plot=FALSE)$acf[2],3)` y `r round(acf(dD,lag.max=12,plot=FALSE)$acf[13],3)`. Se examinó la diferencia regular para reducirla y la estacional para tratar la repetición anual. Los picos de corto plazo y los múltiplos de doce orientan los candidatos con términos AR y MA; se comparó también una alternativa sin diferencia estacional para no imponerla cuando una estructura autorregresiva estacional pudiera ser suficiente. La ACF y la PACF son orientativas: no determinan un orden único. Por esta razón se ajustaron cinco especificaciones manuales, incluyendo una versión logarítmica, en vez de depender de `auto.arima()`.
+
+## Identificación de la regresión dinámica
+
+```{r}
+#| label: fig-reg-pre
+#| fig-cap: "Identificación de la estructura de errores de la regresión con tendencia, mes e indicador 2020."
+#| fig-width: 6.5
+#| fig-height: 3.8
+ggtsdisplay(e, lag.max = 24, main = "Residuos de la regresión inicial")
+ggtsdisplay(diff(e), lag.max = 24, main = "Primera diferencia de los residuos")
+```
+
+La regresión preliminar permite examinar qué parte de la estructura temporal permanece después de incluir la tendencia, la estacionalidad y el indicador de 2020. La ACF de sus residuos en el primer rezago es `r round(acf(e, plot=FALSE)$acf[2],3)`, mientras que la PACF en los rezagos uno y dos es de `r round(pacf(e, plot=FALSE)$acf[1],3)` y `r round(pacf(e, plot=FALSE)$acf[2],3)`, respectivamente. Se probaron errores AR(1) y AR(2) para representar persistencia de corto plazo, así como errores con una diferencia regular para considerar una posible tendencia estocástica. En estos últimos se comparó la caminata aleatoria con deriva, MA(1) y una alternativa con componente AR estacional. También se evaluó la escala logarítmica. Al incorporar los indicadores mensuales no se utiliza una diferencia estacional en el error, pues esta eliminaría los efectos mensuales determinísticos. No se incluyen simultáneamente una columna de tendencia y la deriva de `Arima()`.
+
+## Selección de los finalistas
+
+### Suavizamiento exponencial
+
+```{r}
+#| label: tbl-val-s
+#| tbl-cap: "RMSE anual de validación: suavizamiento exponencial (MW)."
+kable(val_s, digits = 2, col.names = c("Modelo", "2021", "2022", "2023", "Media"))
+```
+
+El menor RMSE promedio de la familia corresponde a **`r val_s$Modelo[sel_s]`** (`r round(val_s$RMSE_medio[sel_s],2)` MW).
+
+### SARIMA
+
+```{r}
+#| label: tbl-val-a
+#| tbl-cap: "RMSE anual de validación: sarima (MW)."
+kable(val_a, digits = c(0,2,2,2,2,4),
+      col.names = c("Modelo", "2021", "2022", "2023", "Media", "p LB"))
+```
+
+El finalista es **`r val_a$Modelo[sel_a]`**, con RMSE medio de `r round(val_a$RMSE_medio[sel_a],2)` MW y valor p de Ljung-Box de `r format.pval(val_a$p_LB[sel_a],digits=3,eps=0.000001)`. `r if (any(val_a$p_LB >= 0.05)) "Se escogió el menor error entre los candidatos sin evidencia conjunta de autocorrelación." else "Ninguna alternativa superó el diagnóstico a 24 rezagos; se escogió la de menor error y se conserva esta limitación."`
+
+### Regresión
+
+```{r}
+#| label: tbl-val-r
+#| tbl-cap: "RMSE anual de validación: regresión (MW)."
+kable(val_r, digits = 2, col.names = c("Modelo", "2021", "2022", "2023", "Media"))
+```
+
+El menor RMSE promedio de la familia corresponde a **`r val_r$Modelo[sel_r]`** (`r round(val_r$RMSE_medio[sel_r],2)` MW).
+
+### Regresión dinámica
+
+```{r}
+#| label: tbl-val-d
+#| tbl-cap: "RMSE anual de validación: regresión dinámica (MW)."
+kable(val_d, digits = c(0,2,2,2,2,4),
+      col.names = c("Modelo", "2021", "2022", "2023", "Media", "p LB"))
+```
+
+El finalista es **`r val_d$Modelo[sel_d]`**, con RMSE medio de `r round(val_d$RMSE_medio[sel_d],2)` MW y valor p de Ljung-Box de `r format.pval(val_d$p_LB[sel_d],digits=3,eps=0.000001)`. `r if (any(val_d$p_LB >= 0.05)) "Se escogió el menor error entre los candidatos sin evidencia conjunta de autocorrelación." else "Ninguna alternativa superó el diagnóstico a 24 rezagos; se escogió la de menor error y se conserva esta limitación."`
+
+```{r}
+#| label: tbl-criterios
+#| tbl-cap: "Criterios de información de candidatos comparables dentro de cada grupo (ajuste hasta 2023)."
+kable(data.frame(Modelo = c("SARIMA 1", "SARIMA 2", "SARIMA 3", "Dinámica AR(1)", "Dinámica AR(2)", "Dinámica I(1)", "Dinámica IMA(1,1)", "Dinámica IMA con AR estacional"),
+ Grupo = c("A", "A", "A", "B", "B", "C", "C", "C"),
+ AICc = c(a1_23$aicc, a2_23$aicc, a3_23$aicc, d1_23$aicc, d2_23$aicc, d3_23$aicc, d4_23$aicc, d6_23$aicc),
+ BIC = c(a1_23$bic, a2_23$bic, a3_23$bic, d1_23$bic, d2_23$bic, d3_23$bic, d4_23$bic, d6_23$bic)), digits=2)
+```
+
+Los criterios de información se presentan únicamente entre candidatos con respuesta en niveles, la misma diferenciación y una estructura de regresores comparable dentro de cada grupo. No se comparan directamente los grupos A, B y C. El menor AICc no necesariamente coincide con el menor RMSE fuera de muestra; por ello se mantuvo el criterio de selección predictiva establecido.
+
+## Comparación en 2024
+
+```{r}
+#| label: tbl-finalistas
+#| tbl-cap: "Errores de los cuatro finalistas en 2024 y promedio de validación 2021–2023."
+kable(ranking[,c("Familia","RMSE","MAE","MAPE","ME","Validacion")], digits=2,
+      col.names = c("Familia", "RMSE", "MAE", "MAPE (%)", "ME", "RMSE val."))
+```
+
+```{r}
+#| label: fig-comparacion
+#| fig-cap: "Demanda observada y pronósticos de doce meses para 2024."
+#| fig-width: 6.6
+#| fig-height: 3.6
+autoplot(window(y, start = c(2022,1)), series = "Observado") +
+  autolayer(f_s, series = "Suavizamiento", PI = FALSE) +
+  autolayer(f_a, series = "SARIMA", PI = FALSE) +
+  autolayer(f_r, series = "Regresión", PI = FALSE) +
+  autolayer(f_d, series = "Regresión dinámica", PI = FALSE) +
+  labs(x = "Año", y = "Demanda máxima (MW)", colour = "Serie") + theme_minimal()
+```
+
+El finalista con menor RMSE en 2024 fue **`r ranking$Modelo[1]`**, con `r round(ranking$RMSE[1],2)` MW, frente a `r round(ranking$RMSE[2],2)` MW del segundo lugar. El error absoluto medio del primero fue de `r round(ranking$MAE[1],2)` MW y el error porcentual absoluto medio de `r round(ranking$MAPE[1],2)` %. El modelo ingenuo estacional obtuvo `r round(rmse_naive,2)` MW de RMSE; por tanto, el mejor de los cuatro finalistas `r texto_ref`. La diferencia entre los modelos se refiere a estos doce meses y no constituye por sí sola evidencia de superioridad general.
+
+## Diagnóstico de residuos
+
+```{r}
+#| label: tbl-lb
+#| tbl-cap: "Diagnósticos de autocorrelación y normalidad hasta 2023, y cobertura en 2024."
+kable(data.frame(Familia = finalistas$Familia,
+  Prueba = c("Ljung-Box", "Ljung-Box", "Breusch-Godfrey", "Ljung-Box"),
+  p = format.pval(finalistas$p_residuos, digits=3, eps=0.000001),
+  `p Shapiro` = format.pval(finalistas$p_normalidad, digits=3, eps=0.000001),
+  `Cobertura 95 (%)` = round(finalistas$Cobertura95,1), check.names=FALSE))
+```
+
+```{r}
+#| label: fig-res-s
+#| fig-cap: "Diagnóstico de residuos del finalista de Holt-Winters."
+#| fig-width: 6.5
+#| fig-height: 3.5
+checkresiduals(m_s, lag = 24)
+```
+
+```{r}
+#| label: fig-res-a
+#| fig-cap: "Diagnóstico de residuos del finalista de SARIMA."
+#| fig-width: 6.5
+#| fig-height: 3.5
+checkresiduals(m_a, lag = 24)
+ggPacf(residuals(m_a), lag.max = 24) + ggtitle("PACF: SARIMA")
+```
+
+```{r}
+#| label: fig-res-r
+#| fig-cap: "Diagnóstico de residuos del finalista de regresión."
+#| fig-width: 6.5
+#| fig-height: 3.5
+checkresiduals(m_r, lag = 24)
+```
+
+```{r}
+#| label: fig-res-d
+#| fig-cap: "Diagnóstico de residuos del finalista de regresión dinámica."
+#| fig-width: 6.5
+#| fig-height: 3.5
+checkresiduals(m_d, lag = 24)
+ggPacf(residuals(m_d), lag.max = 24) + ggtitle("PACF: regresión dinámica")
+```
+
+En el caso del modelo con menor RMSE, el valor p fue `r format.pval(ranking$p_residuos[1],digits=3,eps=0.000001)`; `r texto_lb`. El valor p de Shapiro-Wilk fue `r format.pval(ranking$p_normalidad[1],digits=3,eps=0.000001)`. Este contraste se interpreta con cautela si existe autocorrelación. La cobertura de su intervalo del 95 % fue de `r round(ranking$Cobertura95[1],1)` % de las doce observaciones de prueba. Dado el tamaño de ese conjunto, la cobertura se interpreta de manera descriptiva. El diagnóstico de las innovaciones permite distinguir la capacidad predictiva del cumplimiento de los supuestos; la presencia de dependencia residual puede traducirse en intervalos poco confiables.
+
+### Coeficientes de los finalistas ARIMA y regresión dinámica
+
+```{r}
+#| label: tbl-coef-arima
+#| tbl-cap: "Coeficientes del finalista SARIMA, ajuste hasta 2023."
+coef_arima <- unclass(coeftest(m_a))
+kable(data.frame(Parametro = rownames(coef_arima),
+                 Estimacion = coef_arima[, 1],
+                 `Error estandar` = coef_arima[, 2],
+                 Estadistico = coef_arima[, 3],
+                 `Valor p` = format.pval(coef_arima[, 4], digits = 3, eps = 0.001),
+                 check.names = FALSE), digits = 3, row.names = FALSE)
+```
+
+```{r}
+#| label: tbl-coef-din
+#| tbl-cap: "Coeficientes del finalista de regresión dinámica, ajuste hasta 2023."
+coef_din <- unclass(coeftest(m_d))
+kable(data.frame(Parametro = rownames(coef_din),
+                 Estimacion = coef_din[, 1],
+                 `Error estandar` = coef_din[, 2],
+                 Estadistico = coef_din[, 3],
+                 `Valor p` = format.pval(coef_din[, 4], digits = 3, eps = 0.001),
+                 check.names = FALSE), digits = 3, row.names = FALSE)
+```
+
+Los coeficientes se interpretan en la escala en que se estimó cada modelo. En particular, el indicador de 2020 representa una diferencia asociada a ese periodo una vez consideradas las otras variables del modelo, no una estimación causal. La significancia de los coeficientes se considera junto con los diagnósticos y la capacidad de pronóstico.
+
+## Pronóstico a doce meses
+
+Se reajustó la especificación seleccionada con los registros hasta diciembre de 2024 y se proyectó la demanda de 2025 con intervalos del 80 % y 95 %. Se mantuvieron los mismos órdenes, transformación y regresores. Como 2025 ya transcurrió, el resultado es una proyección retrospectiva emitida desde el último mes de la base y no un pronóstico operativo actualizado.
+
+```{r}
+#| label: fig-pronostico
+#| fig-cap: "Pronóstico de 2025 desde diciembre de 2024, con intervalos de 80 % y 95 %."
+#| fig-width: 6.6
+#| fig-height: 3.5
+autoplot(window(y, start = c(2019,1)), series = "Observado") +
+  autolayer(f_final, series = "Pronóstico") +
+  labs(x = "Año", y = "Demanda máxima (MW)", colour = "Serie") + theme_minimal()
+```
+
+```{r}
+#| label: tbl-pronostico
+#| tbl-cap: "Pronósticos mensuales e intervalos (MW)."
+kable(tabla2025, digits=2)
+```
+
+El mayor valor pronosticado se obtiene en `r meses[which.max(f_final$mean)]`, con `r round(max(f_final$mean),2)` MW. Los intervalos representan incertidumbre bajo los supuestos del modelo; su uso para decisiones de capacidad requiere tomar en cuenta el diagnóstico anterior y actualizar el ajuste con información reciente.
+
+# Discusión
+
+El análisis permite distinguir la capacidad de describir la serie de la capacidad de anticipar observaciones que no se utilizaron en el ajuste. La tendencia, por sí sola, puede generar un buen ajuste histórico sin recoger la dependencia de corto plazo. Por este motivo se examinaron las innovaciones de los modelos y se consideraron regresiones con errores ARIMA, siguiendo el mismo procedimiento de identificación trabajado en las evaluaciones del curso. Los modelos se compararon en un horizonte anual, que incluye todos los meses del ciclo estacional.
+
+El finalista de menor error en 2024 fue `r ranking$Modelo[1]`; su RMSE promedio en los tres años de validación fue `r round(ranking$Validacion[1],2)` MW. Es importante considerar ambos resultados, puesto que la precisión puede variar entre periodos. Además, el conjunto de 2024 ya se había revisado en avances anteriores; no debe interpretarse como una evaluación totalmente independiente de todo el proceso de investigación. Sería conveniente comprobar la recomendación con nuevos datos que no hayan orientado las decisiones previas.
+
+La corrección de los registros de 2020 permitió trabajar con valores mensuales observados, pero no garantiza que no existan otras diferencias entre las fuentes. Tampoco se dispuso de información meteorológica o económica para explicar cambios en el consumo y la potencia requerida. Incorporar estas variables podría ser útil, siempre que se disponga de una serie histórica consistente y de valores o pronósticos futuros, y que su contribución se evalúe fuera de muestra. No se recomienda añadirlas únicamente para reducir el valor de alguna autocorrelación residual.
+
+# Conclusiones
+
+Se compararon 18 especificaciones de las cuatro familias solicitadas, utilizando la serie de demanda máxima mensual corregida y tres ventanas anuales de validación. Para el ejercicio de pronóstico de 2024, entre los cuatro finalistas se recomienda **`r ranking$Modelo[1]`**, con un RMSE de `r round(ranking$RMSE[1],2)` MW y un MAE de `r round(ranking$MAE[1],2)` MW. En relación con el pronóstico ingenuo estacional, este modelo `r texto_ref`. En el diagnóstico residual, `r texto_lb`.
+
+La recomendación se limita al periodo y horizonte analizados. Para un uso operativo, se requiere actualizar la información, ampliar la evaluación a nuevos periodos y verificar que los intervalos describan adecuadamente la incertidumbre. Si persiste un patrón en los residuos, conviene revisar primero la especificación de los errores y solo después considerar variables externas que puedan aportar información predictiva. Así se evita incrementar la complejidad sin evidencia de una mejora real.
+
+# Referencias
+
+Autoridad Reguladora de los Servicios Públicos (ARESEP). (s. f.). *Demanda máxima de electricidad*. https://aresep.go.cr/datos-abiertos/demanda-maxima-electricidad/
+
+Centro Nacional de Control de Energía (CENCE). (2020). *Informe anual 2020*. Instituto Costarricense de Electricidad. https://apps.grupoice.com/CenceWeb/documentos/3/3008/13/Bolet%C3%ADn%20CENCE%202020.pdf
+
+Chikobvu, D., & Sigauke, C. (2012). Regression-SARIMA modelling of daily peak electricity demand in South Africa. *Journal of Energy in Southern Africa, 23*(3), 23–30. https://doi.org/10.17159/2413-3051/2012/v23i3a3169
+
+Chou Chen, S. W. (s. f.). *Análisis de series temporales (XS-0127)* [Materiales del curso]. Universidad de Costa Rica. https://swchouchen.github.io/series/ (temas 3, 4, 6 y 7).
+
+Hyndman, R. J., & Khandakar, Y. (2008). Automatic time series forecasting: The forecast package for R. *Journal of Statistical Software, 27*(3), 1–22. https://doi.org/10.18637/jss.v027.i03
+
+Pełka, P. (2023). Analysis and forecasting of monthly electricity demand time series using pattern-based statistical methods. *Energies, 16*(2), 827. https://doi.org/10.3390/en16020827
+
+`r ref_R[1]`
+
+`r ref_forecast[1]`
+
+`r ref_ggplot2[1]`
+
+`r ref_knitr[1]`
+
+`r ref_lmtest[1]`
+
+`r ref_tseries[1]`
+
+# Anexo: reproducibilidad
+
+El documento contiene la lectura de datos, la sustitución de 2020, la identificación, la estimación, las tablas y todas las figuras. Para reproducirlo, se debe colocar `Demanda_maxima_electricidad.csv` junto con el `.qmd`, instalar los paquetes `forecast`, `ggplot2`, `knitr`, `lmtest` y `tseries`, y renderizar con Quarto. La fuente exacta del CSV es el enlace de ARESEP de las referencias. Los valores del CENCE están incorporados en el código. 
+
+Repositorio GitHub: pendiente de incorporar por el grupo.
+
